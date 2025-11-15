@@ -3,3 +3,155 @@ title: Data Cleaning
 format: typst
 ---
 
+Libraries
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+```
+
+Reading Files
+```{r}
+candidates_raw <- read_csv("gerrymandering-YaBoiPasta27/data/g24-candidates-by-district.csv")
+results_raw <- read_excel("gerrymandering-YaBoiPasta27/data/g24-results-by-district.xlsx")
+precinct_raw <- read_csv("gerrymandering-YaBoiPasta27/data/g24_sov_by_g24_svprec.csv")
+census_mapping_raw <- read_csv("gerrymandering-YaBoiPasta27/data/California Congressional Map (1).csv", col_names = FALSE)
+head(candidates_raw)
+head(results_raw)
+head(precinct_raw)
+head(census_mapping_raw)
+
+```
+
+```{r}
+unique(precinct_raw$SVPREC_KEY)
+```
+
+Cleaning
+```{r}
+colnames(candidates_raw) <- tolower(colnames(candidates_raw))
+candidates_clean <- candidates_raw |>
+    mutate(incumbent = str_detect(name, "\\*"), name = str_remove(name, "\\*")) |>
+    filter(district_type != 'ASS') |>
+    mutate(district = as.numeric(district)) |>
+    mutate(field = case_when(
+        field == "CNGDEM01" ~ "house_dem_1",
+        field == "CNGDEM02" ~ "house_dem_2",
+        field == "CNGREP01" ~ "house_rep_1",
+        field == "CNGREP02" ~ "house_rep_2",
+        field == "CNGIND01" ~ "house_ind_1",
+        field == "SENDEM01" ~ "senate_dem_1",
+        field == "SENDEM02" ~ "senate_dem_2",
+        field == "SENREP01" ~ "senate_rep_1",
+        field == "SENREP02" ~ "senate_rep_2",
+        TRUE ~ field  # Keep any other values as-is
+    ))
+precinct_clean <- precinct_raw |> 
+    select(
+        CDDIST, # Congressional district
+        TOTVOTE, # Total votes cast
+        # Presidential (DEM & REP only)
+        PRSDEM01,
+        PRSREP01,
+        # Congressional (DEM & REP only)
+        CNGDEM01,
+        CNGDEM02,
+        CNGREP01,
+        CNGREP02,
+        # US Senate (DEM & REP only)
+        USSDEM01,
+        USSREP01
+    ) |>
+    mutate(across(PRSDEM01:USSREP01, as.numeric)) |>
+    group_by(CDDIST) |>
+    summarize(
+        total_votes = sum(TOTVOTE, na.rm = TRUE),
+        pres_dem_1 = sum(PRSDEM01, na.rm = TRUE),
+        pres_rep_1 = sum(PRSREP01, na.rm = TRUE),
+        house_dem_1 = sum(CNGDEM01, na.rm = TRUE),
+        house_dem_2 = sum(CNGDEM02, na.rm = TRUE),
+        house_rep_1 = sum(CNGREP01, na.rm = TRUE),
+        house_rep_2 = sum(CNGREP02, na.rm = TRUE),
+        senate_dem_1 = sum(USSDEM01, na.rm = TRUE),
+        senate_rep_1 = sum(USSREP01, na.rm = TRUE)
+        ) |>
+    filter(CDDIST != 0) |>
+    pivot_longer(
+        cols = -c(CDDIST, total_votes),
+        names_to = "race_type",
+        values_to = "votes"
+    )
+
+```
+
+Combining
+```{r}
+merged <- precinct_clean |>
+    left_join(candidates_clean, by = c("CDDIST" = "district", "race_type" = "field")) |>
+    mutate(
+    name = case_when(
+      race_type == "pres_dem_1" ~ "Kamala Harris",
+      race_type == "pres_rep_1" ~ "Donald Trump",
+      race_type == "senate_dem_1" ~ "Adam Schiff",
+      race_type == "senate_rep_1" ~ "Steve Garvey",
+      TRUE ~ name
+    ),
+    incumbent = case_when(
+      race_type %in% c("pres_dem_1", "pres_rep_1") ~ FALSE,
+      race_type == "senate_dem_1" ~ TRUE,
+      race_type == "senate_rep_1" ~ FALSE,
+      TRUE ~ incumbent
+    ),
+    contest = case_when(
+      race_type == "pres_dem_1" ~ "PRSDEM01",
+      race_type == "pres_rep_1" ~ "PRSREP01",
+      TRUE ~ contest
+    ),
+    district_type = case_when(
+      race_type %in% c("pres_dem_1", "pres_rep_1") ~ "PRES",
+      race_type %in% c("senate_dem_1", "senate_rep_1") ~ "SEN",
+      TRUE ~ district_type
+    )
+  ) |>
+    select(-c(contest))
+print(merged, n = 416)
+```
+
+
+New Gerrymandered
+```{r}
+precinct_new_clean <- precinct_raw |>
+  select(
+        CDDIST, # Congressional district
+        SVPREC_KEY,
+        TOTVOTE, # Total votes cast
+        # Presidential (DEM & REP only)
+        PRSDEM01,
+        PRSREP01,
+        # Congressional (DEM & REP only)
+        CNGDEM01,
+        CNGDEM02,
+        CNGREP01,
+        CNGREP02,
+        # US Senate (DEM & REP only)
+        USSDEM01,
+        USSREP01
+    ) |>
+    mutate(across(PRSDEM01:USSREP01, as.numeric)) |>
+    mutate(census_index = substr(SVPREC_KEY, 1, 11))
+
+colnames(census_mapping_raw) <- c("census_zone", "congressional_district")
+  
+
+head(precinct_new_clean)
+head(census_mapping)
+```
+
+```{r}
+head(precinct_new_clean)
+print(sum(precinct_raw$SVPREC_KEY %in% census_mapping_raw$census_zone))
+```
+
