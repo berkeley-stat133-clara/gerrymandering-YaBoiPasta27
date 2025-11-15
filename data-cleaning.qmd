@@ -11,6 +11,7 @@ library(readxl)
 library(dplyr)
 library(tidyr)
 library(stringr)
+library(sf)
 ```
 
 Reading Files
@@ -23,11 +24,6 @@ head(candidates_raw)
 head(results_raw)
 head(precinct_raw)
 head(census_mapping_raw)
-
-```
-
-```{r}
-unique(precinct_raw$SVPREC_KEY)
 ```
 
 Cleaning
@@ -49,34 +45,26 @@ candidates_clean <- candidates_raw |>
         field == "SENREP02" ~ "senate_rep_2",
         TRUE ~ field  # Keep any other values as-is
     ))
-precinct_clean <- precinct_raw |> 
+precinct_intermediate <- precinct_raw |> 
     select(
         CDDIST, # Congressional district
         TOTVOTE, # Total votes cast
-        # Presidential (DEM & REP only)
-        PRSDEM01,
-        PRSREP01,
+        SVPREC,
         # Congressional (DEM & REP only)
         CNGDEM01,
         CNGDEM02,
         CNGREP01,
         CNGREP02,
-        # US Senate (DEM & REP only)
-        USSDEM01,
-        USSREP01
-    ) |>
-    mutate(across(PRSDEM01:USSREP01, as.numeric)) |>
+    )
+precinct_clean <- precinct_intermediate |>
+    mutate(across(CNGDEM01:CNGREP02, as.numeric)) |>
     group_by(CDDIST) |>
     summarize(
         total_votes = sum(TOTVOTE, na.rm = TRUE),
-        pres_dem_1 = sum(PRSDEM01, na.rm = TRUE),
-        pres_rep_1 = sum(PRSREP01, na.rm = TRUE),
         house_dem_1 = sum(CNGDEM01, na.rm = TRUE),
         house_dem_2 = sum(CNGDEM02, na.rm = TRUE),
         house_rep_1 = sum(CNGREP01, na.rm = TRUE),
         house_rep_2 = sum(CNGREP02, na.rm = TRUE),
-        senate_dem_1 = sum(USSDEM01, na.rm = TRUE),
-        senate_rep_1 = sum(USSREP01, na.rm = TRUE)
         ) |>
     filter(CDDIST != 0) |>
     pivot_longer(
@@ -85,6 +73,7 @@ precinct_clean <- precinct_raw |>
         values_to = "votes"
     )
 
+precinct_clean
 ```
 
 Combining
@@ -117,41 +106,153 @@ merged <- precinct_clean |>
     )
   ) |>
     select(-c(contest))
-print(merged, n = 416)
+print(merged, n = 20)
 ```
 
-
-New Gerrymandered
 ```{r}
-precinct_new_clean <- precinct_raw |>
-  select(
+precinct <- precinct_raw |> 
+    select(
         CDDIST, # Congressional district
-        SVPREC_KEY,
         TOTVOTE, # Total votes cast
-        # Presidential (DEM & REP only)
-        PRSDEM01,
-        PRSREP01,
+        SVPREC,
         # Congressional (DEM & REP only)
         CNGDEM01,
         CNGDEM02,
         CNGREP01,
         CNGREP02,
-        # US Senate (DEM & REP only)
-        USSDEM01,
-        USSREP01
     ) |>
-    mutate(across(PRSDEM01:USSREP01, as.numeric)) |>
-    mutate(census_index = substr(SVPREC_KEY, 1, 11))
+    mutate(across(CNGDEM01:CNGREP02, as.numeric)) |>
+    group_by(SVPREC) |>
+    summarize(
+        total_votes = sum(TOTVOTE, na.rm = TRUE),
+        house_dem_1 = sum(CNGDEM01, na.rm = TRUE),
+        house_dem_2 = sum(CNGDEM02, na.rm = TRUE),
+        house_rep_1 = sum(CNGREP01, na.rm = TRUE),
+        house_rep_2 = sum(CNGREP02, na.rm = TRUE),
+        ) |>
+    pivot_longer(
+        cols = -c(SVPREC, total_votes),
+        names_to = "race_type",
+        values_to = "votes"
+    ) |>
+  mutate(base_precinct = str_remove(SVPREC, "[A-Z]+$")) |>
+  mutate(party = case_when(
+    str_detect(race_type, "dem") ~ "house_dem",
+    str_detect(race_type, "rep") ~ "house_rep",
+    TRUE ~ race_type
+  )) |>
+  group_by(base_precinct, party) |>
+  summarize(
+    total_votes = first(total_votes),  # or sum if they differ
+    combined_votes = sum(votes),
+    .groups = "drop"
+  ) |>
+  filter(base_precinct != "")
 
-colnames(census_mapping_raw) <- c("census_zone", "congressional_district")
-  
+precinct
+```
 
-head(precinct_new_clean)
-head(census_mapping)
+
+```{r}
+svprecgeo <- st_read("gerrymandering-YaBoiPasta27/data/shapefiles/srprec_state_g24_v01_shp.shp")
+newdistricts <- st_read("gerrymandering-YaBoiPasta27/data/shapefiles/AB604.shp")
+newdistricts
+```
+
+
+```{r}
+merged_data <- svprecgeo |>
+  left_join(precinct, by = c("SRPREC" = "base_precinct")) |>
+  select(-c('ELECTION', 'PREC_TYPE', 'FIPS_CODE', 'SRPREC_KEY', 'total_votes'))
+
+newdistricts <- newdistricts |>
+  select(c('DISTRICT', 'geometry'))
+
+st_crs(merged_data)
+st_crs(newdistricts)
+```
+
+
+```{r}
+sr_precincts <- merged_data |>
+  st_transform(3310) |>
+  st_set_precision(1) |>
+  st_make_valid() |>
+  st_collection_extract("POLYGON") |>
+  mutate(precinct_area = st_area(geometry))
+
+# Step 2: Prepare congressional district data  
+districts <- newdistricts |>
+  st_transform(3310)|>
+  st_make_valid()
+
+# Step 3: Perform spatial intersection
+intersections <- st_intersection(sr_precincts, districts)
+
+# Step 4: Calculate area proportions and allocate votes
+intersections <- intersections |>
+  mutate(
+    intersection_area = st_area(geometry),
+    area_proportion = as.numeric(intersection_area / precinct_area),
+    allocated_votes = combined_votes * area_proportion
+  )
+
+# Step 5: Check for any issues
+intersections |>
+  st_drop_geometry() |>
+  summarize(
+    max_proportion = max(area_proportion, na.rm = TRUE),
+    min_proportion = min(area_proportion, na.rm = TRUE),
+    any_over_1 = any(area_proportion > 1.01, na.rm = TRUE)
+  )
+
+# Step 6: Aggregate votes by district and party
+district_votes <- intersections |>
+  st_drop_geometry() |>
+  group_by(DISTRICT, party) |>
+  summarize(
+    total_votes = sum(allocated_votes, na.rm = TRUE),
+    .groups = "drop"
+  )
+# View results
+print(district_votes)
+cat("Allocated total votes:", sum(district_votes$total_votes), "\n")
 ```
 
 ```{r}
-head(precinct_new_clean)
-print(sum(precinct_raw$SVPREC_KEY %in% census_mapping_raw$census_zone))
-```
+original_district_votes <- precinct_clean %>%
+    mutate(party = case_when(
+        grepl("dem", race_type) ~ "house_dem",
+        grepl("rep", race_type) ~ "house_rep",
+        TRUE ~ race_type
+    )) %>%
+    group_by(CDDIST, party) %>%
+    summarize(
+        original_votes = sum(votes),
+        .groups = "drop"
+    )
 
+# Identify districts with 0 votes in the new map
+districts_with_zeros <- district_votes %>%
+    filter(total_votes == 0) %>%
+    select(DISTRICT, party)
+
+# Fill in zeros with original data
+# Assuming DISTRICT in newdistricts corresponds to CDDIST in precinct_clean
+district_votes_filled <- district_votes %>%
+    mutate(DISTRICT = as.numeric(DISTRICT)) %>%
+    left_join(
+        original_district_votes,
+        by = c("DISTRICT" = "CDDIST", "party" = "party")
+    ) %>%
+    mutate(
+        total_votes = if_else(
+            total_votes == 0 & !is.na(original_votes),
+            original_votes,
+            total_votes
+        )
+    ) %>%
+    select(-original_votes)
+
+print(district_votes, n = 128)
+```
