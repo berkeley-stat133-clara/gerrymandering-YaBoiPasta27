@@ -1,10 +1,8 @@
 ---
 title: "Gerrymandering Analysis"
 format: 
-  html:
-    theme: cosmo
-    toc: true
-    toc-location: left
+  dashboard:
+    scrolling: true
 execute:
   echo: true
   warning: false
@@ -12,76 +10,210 @@ execute:
 jupyter: r
 ---
 
-```{r}
-library(tidyverse)
-library(DT)
-library(plotly)
-
-district_summary <- tibble(
-Category = c(
-"Mean Democratic Vote Share",
-"Median Democratic Vote Share",
-"Mean-Median Score",
-"Efficiency Gap",
-"Total D Wasted Votes",
-"Total R Wasted Votes",
-"Democratic Seats Won",
-"Republican Seats Won"
-),
-Before = c(
-61.58, 63.08, -1.5, -9.13, 3064992, 4433524, 43, 9
-),
-After = c(
-61.58, 63.08, -4.3, -28.64, 2904403, 5236623, 50, 2
-)
-)
-
-```
+### **2024 Election Results and the 2024 District Map**
 
 ```{r}
-datatable(
-district_summary,
-options = list(pageLength = 10, dom = 't'),
-caption = "Comparison of Redistricting Statistics: Before vs After Gerrymander"
-)
+election_metrics <- merged |>
+    filter(district_type == "CNG", votes > 0) |>
+    group_by(CDDIST) |>
+    summarize(
+        total_district_votes = first(total_votes),
+        dem_votes = sum(votes[grepl("dem", race_type)]),
+        rep_votes = sum(votes[grepl("rep", race_type)]),
+        dem_vote_share = dem_votes / (dem_votes + rep_votes),
+        rep_vote_share = rep_votes / (dem_votes + rep_votes),
+        dem_won = dem_votes > rep_votes
+    ) |>
+ungroup()
+
+# MEAN MEDIAN
+mean_dem_share <- mean(election_metrics$dem_vote_share)
+
+# Median vote share
+median_dem_share <- median(election_metrics$dem_vote_share)
+
+# Mean-median score
+mean_median_score <- mean_dem_share - median_dem_share
+
+cat("Mean Democratic Vote Share:", round(mean_dem_share * 100, 2), "%\n")
+cat("Median Democratic Vote Share:", round(median_dem_share * 100, 2), "%\n")
+cat("Mean-Median Score:", round(mean_median_score * 100, 2), "%\n")
+if (mean_median_score > 0) {
+    cat("Interpretation: Small Democratic advantage (mean > median)\n\n")
+} else {
+    cat("Interpretation: Small Republican advantage (mean < median)\n\n")
+}
+
+# EFFICIENCY GAP
+election_metrics <- election_metrics %>%
+    mutate(
+        vote_margin = abs(dem_votes - rep_votes),
+        dem_wasted = if_else(
+            dem_won,
+            dem_votes - (dem_votes + rep_votes) / 2,
+            dem_votes
+        ),
+        rep_wasted = if_else(
+            !dem_won,
+            rep_votes - (dem_votes + rep_votes) / 2,
+            rep_votes
+        )
+    )
+
+total_dem_wasted <- sum(election_metrics$dem_wasted)
+total_rep_wasted <- sum(election_metrics$rep_wasted)
+total_votes_cast <- sum(election_metrics$dem_votes + election_metrics$rep_votes)
+efficiency_gap <- (total_rep_wasted - total_dem_wasted) / total_votes_cast
+
+cat("EFFICIENCY GAP")
+cat("Total Democratic Wasted Votes:", format(total_dem_wasted, big.mark = ","), "\n")
+cat("Total Republican Wasted Votes:", format(total_rep_wasted, big.mark = ","), "\n")
+cat("Efficiency Gap:", round(efficiency_gap * 100, 2), "%\n")
+if (abs(efficiency_gap) < 0.08) {
+    cat("Interpretation: Within acceptable range (< 8%)\n")
+} else if (efficiency_gap > 0) {
+    cat("Interpretation: Republicans have an efficiency advantage (wasting fewer votes)\n")
+} else {
+    cat("Interpretation: Democrats have an efficiency advantage (wasting fewer votes)\n")
+}
+
+cat("\nWon:\n")
+cat("Democrats:", sum(election_metrics$dem_won), "seats\n")
+cat("Republicans:", sum(!election_metrics$dem_won), "seats\n")
+
+district24 <- st_read("gerrymandering-YaBoiPasta27/data/shapefiles/tl_2024_06_cd119.shp")
+district24 <- select(district24, 'CD119FP', 'geometry')
+election_2024 <- precinct_clean %>%
+    mutate(party = if_else(grepl("dem", race_type), "house_dem", "house_rep")) %>%
+    group_by(CDDIST, party) %>%
+    summarize(votes = sum(votes), .groups = "drop") %>%
+    pivot_wider(names_from = party, values_from = votes, values_fill = 0) %>%
+    mutate(
+        dem_votes = house_dem,
+        rep_votes = house_rep,
+        total_votes = dem_votes + rep_votes,
+        dem_vote_share = dem_votes / total_votes,
+        dem_won = dem_votes > rep_votes,
+        CDDIST = sprintf("%02d", CDDIST)
+    )
+
+# Join with shapefile
+districts_2024 <- district24 %>%
+    left_join(election_2024, by = c("CD119FP" = "CDDIST")) %>%
+    mutate(winner = if_else(dem_won, "Democrat", "Republican", missing = "Unknown"))
+
+# Now you can map it
+ggplot(districts_2024) +
+    geom_sf(aes(fill = winner), color = "white", size = 0.2) +
+    scale_fill_manual(
+        values = c("Democrat" = "#2E74C0", "Republican" = "#CB454A"),
+        na.value = "gray80"
+    ) +
+    theme_void() +
+    labs(title = "2024 Congressional Districts", fill = NULL)
 ```
+
+### **2025 Theoretical Election Results and the Proposed 2025 District Map**
 
 ```{r}
-seat_data <- tibble(
-Party = rep(c("Democrats", "Republicans"), 2),
-Seats = c(43, 9, 50, 2),
-Scenario = rep(c("Before Gerrymander", "After Gerrymander"), each = 2)
-)
+election_metrics <- district_votes %>%
+    pivot_wider(
+        names_from = party,
+        values_from = total_votes,
+        values_fill = 0
+    ) %>%
+    mutate(
+        dem_votes = house_dem,
+        rep_votes = house_rep,
+        total_district_votes = dem_votes + rep_votes,
+        dem_vote_share = dem_votes / (dem_votes + rep_votes),
+        rep_vote_share = rep_votes / (dem_votes + rep_votes),
+        dem_won = dem_votes >= rep_votes
+    )
 
-plot_ly(seat_data, x = ~Scenario, y = ~Seats, color = ~Party, type = 'bar') %>%
-layout(barmode = 'group',
-title = "Seats Won by Party",
-yaxis = list(title = "Number of Seats"))
+# MEAN MEDIAN
+mean_dem_share <- mean(election_metrics$dem_vote_share, na.rm = TRUE)
 
+# Median vote share
+median_dem_share <- median(election_metrics$dem_vote_share, na.rm = TRUE)
+
+# Mean-median score
+mean_median_score <- mean_dem_share - median_dem_share
+
+cat("MEAN-MEDIAN ANALYSIS\n")
+cat("Mean Democratic Vote Share:", round(mean_dem_share * 100, 2), "%\n")
+cat("Median Democratic Vote Share:", round(median_dem_share * 100, 2), "%\n")
+cat("Mean-Median Score:", round(mean_median_score * 100, 2), "%\n")
+
+# EFFICIENCY GAP
+election_metrics <- election_metrics %>%
+    mutate(
+        vote_margin = abs(dem_votes - rep_votes),
+        dem_wasted = if_else(
+            dem_won,
+            dem_votes - (dem_votes + rep_votes) / 2,
+            dem_votes
+        ),
+        rep_wasted = if_else(
+            !dem_won,
+            rep_votes - (dem_votes + rep_votes) / 2,
+            rep_votes
+        )
+    )
+
+total_dem_wasted <- sum(election_metrics$dem_wasted, na.rm = TRUE)
+total_rep_wasted <- sum(election_metrics$rep_wasted, na.rm = TRUE)
+total_votes_cast <- sum(election_metrics$dem_votes + election_metrics$rep_votes, na.rm = TRUE)
+efficiency_gap <- (total_rep_wasted - total_dem_wasted) / total_votes_cast
+
+cat("EFFICIENCY GAP\n")
+cat("Total Democratic Wasted Votes:", format(round(total_dem_wasted), big.mark = ","), "\n")
+cat("Total Republican Wasted Votes:", format(round(total_rep_wasted), big.mark = ","), "\n")
+cat("Efficiency Gap:", round(efficiency_gap * 100, 2), "%\n")
+
+cat("SEATS WON\n")
+cat("Democrats:", sum(election_metrics$dem_won, na.rm = TRUE), "seats\n")
+cat("Republicans:", sum(!election_metrics$dem_won, na.rm = TRUE), "seats\n")
+cat("Total Districts:", nrow(election_metrics), "\n")
+
+district_votes_wide <- district_vote %>%
+    filter(!is.na(party)) %>%
+    mutate(DISTRICT = sprintf("%02d", as.numeric(DISTRICT))) %>%
+    pivot_wider(
+        names_from = party,
+        values_from = total_votes,
+        values_fill = 0
+    ) %>%
+    mutate(
+        dem_votes = house_dem,
+        rep_votes = house_rep,
+        total_votes = dem_votes + rep_votes,
+        dem_vote_share = dem_votes / total_votes,
+        dem_won = dem_votes > rep_votes
+    )
+
+# Join with shapefile
+districts_new_combined <- newdistricts %>%
+    left_join(district_votes_wide, by = c("DISTRICT" = "DISTRICT")) %>%
+    mutate(winner = if_else(dem_won, "Democrat", "Republican", missing = "Unknown"))
+
+# Now you can map it
+ggplot(districts_new_combined) +
+    geom_sf(aes(fill = winner), color = "white", size = 0.2) +
+    scale_fill_manual(values = c("Democrat" = "#2E74C0", "Republican" = "#CB454A"),
+                      na.value = "gray80") +
+    theme_void() +
+    labs(title = "Proposed Districts", fill = NULL)
 ```
 
-```{r}
-wasted_data <- tibble(
-Party = rep(c("Democrats","Republicans"),2),
-WastedVotes = c(3064992, 4433524, 2904403, 5236623),
-Scenario = rep(c("Before Gerrymander","After Gerrymander"), each=2)
-)
+### **Maps**
 
-plot_ly(wasted_data, x = ~Scenario, y = ~WastedVotes, color = ~Party, type='bar') %>%
-layout(barmode = 'group',
-title = "Wasted Votes by Party",
-yaxis = list(title = "Number of Wasted Votes"))
-```
+Methodology
 
-```{r}
-vote_data <- tibble(
-Metric = rep(c("Mean","Median"),2),
-VoteShare = c(61.58, 63.08, 61.58, 63.08),
-Scenario = rep(c("Before Gerrymander","After Gerrymander"), each=2)
-)
+Data Sources: 2024 votes from CA Statewide Database; 2024 districts from Census TIGER; proposed districts from AB 604.
 
-plot_ly(vote_data, x=~Scenario, y=~VoteShare, color=~Metric, type='scatter', mode='lines+markers') %>%
-layout(title="Mean and Median Democratic Vote Share",
-yaxis=list(title="Vote Share (%)"))
+Method: Area-weighted interpolation allocated precinct votes to new districts proportionally by geometric overlap, assuming uniform voter distribution.
 
-```
+Metrics: Mean-median measures vote packing (±2% neutral); Efficiency gap measures wasted votes (±8% threshold).
+
+Caveats: Single metrics don't prove gerrymandering; geographic clustering affects results; projections assume stable voter preferences.
