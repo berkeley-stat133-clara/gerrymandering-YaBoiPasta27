@@ -4,25 +4,86 @@ format: typst
 ---
 
 ### Question 1
-
-Put your question here.
+Closest House race?
 
 ### Answer 1
 
-Put your answer here.
+```{r}
+closest_house_races <- merged |>
+    filter(district_type == "CNG", votes > 0) |>
+    group_by(CDDIST) |>
+    summarize(
+        winner = name[which.max(votes)],
+        winner_votes = max(votes),
+        runner_up_votes = sort(votes, decreasing = TRUE)[2],
+        margin = max(votes) - sort(votes, decreasing = TRUE)[2],
+        margin_pct = (margin / total_votes[1]) * 100
+    ) |>
+    arrange(margin)
+closest_house_races
+```
+
+closest race was CA45, the winner being Derek Tran, who won by 694 votes
 
 ### Question 2
 
-Put your question here.
+How did incumbents perform compared to non-incumbents in House races?
 
 ### Answer 2
 
-Put your answer here.
+```{r}
+incumbent_performance <- merged |>
+    filter(district_type == "CNG", votes > 0) |>
+    group_by(CDDIST) |>
+    mutate(
+        vote_share = votes / sum(votes) * 100,
+        won = votes == max(votes)
+    ) |>
+    ungroup() |>
+    group_by(incumbent) |>
+    summarize(
+        n_candidates = n(),
+        avg_vote_share = mean(vote_share),
+        win_rate = sum(won) / n() * 100,
+        total_votes = sum(votes)
+    )
+incumbent_performance
+```
 
+incumbents had a huge advantage, winning 93.5% of their reelection bids
 ### Question 3
 
-Put your question here.
+Which districts showed the strongest partisan lean (largest gap between Democratic and Republican performance)?
 
 ### Answer 3
 
-Put your answer here.
+```{r}
+partisan_lean <- merged |>
+    filter(district_type %in% c("PRES", "CNG", "SEN"), votes > 0) |>
+    mutate(party = ifelse(grepl("dem", race_type), "DEM", "REP")) |>
+    group_by(CDDIST, party) |>
+    summarize(
+        total_party_votes = sum(votes),
+        .groups = "drop"
+    ) |>
+    pivot_wider(
+        names_from = party,
+        values_from = total_party_votes,
+        values_fill = 0
+    ) |>
+    mutate(
+        total_votes = DEM + REP,
+        dem_pct = (DEM / total_votes) * 100,
+        rep_pct = (REP / total_votes) * 100,
+        partisan_lean = dem_pct - rep_pct,
+        lean_category = case_when(
+        partisan_lean > 20 ~ "Strongly Democratic",
+        partisan_lean > 10 ~ "Lean Democratic",
+        partisan_lean > -10 ~ "Competitive",
+        partisan_lean > -20 ~ "Lean Republican",
+        TRUE ~ "Strongly Republican"
+    )
+  ) |>
+arrange(desc(abs(partisan_lean)))
+partisan_lean
+```
