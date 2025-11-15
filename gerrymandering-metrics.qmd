@@ -5,7 +5,77 @@ format: typst
 
 ### 2024 Election Results and the 2024 District Map
 
+```{r}
+election_metrics <- merged |>
+    filter(district_type == "CNG", votes > 0) |>
+    group_by(CDDIST) |>
+    summarize(
+        total_district_votes = first(total_votes),
+        dem_votes = sum(votes[grepl("dem", race_type)]),
+        rep_votes = sum(votes[grepl("rep", race_type)]),
+        dem_vote_share = dem_votes / (dem_votes + rep_votes),
+        rep_vote_share = rep_votes / (dem_votes + rep_votes),
+        dem_won = dem_votes > rep_votes
+    ) |>
+ungroup()
 
+# MEAN MEDIAN
+mean_dem_share <- mean(election_metrics$dem_vote_share)
+
+# Median vote share
+median_dem_share <- median(election_metrics$dem_vote_share)
+
+# Mean-median score
+mean_median_score <- mean_dem_share - median_dem_share
+
+cat("Mean Democratic Vote Share:", round(mean_dem_share * 100, 2), "%\n")
+cat("Median Democratic Vote Share:", round(median_dem_share * 100, 2), "%\n")
+cat("Mean-Median Score:", round(mean_median_score * 100, 2), "%\n")
+if (mean_median_score > 0) {
+    cat("Interpretation: Small Democratic advantage (mean > median)\n\n")
+} else {
+    cat("Interpretation: Small Republican advantage (mean < median)\n\n")
+}
+
+# EFFICIENCY GAP
+election_metrics <- election_metrics %>%
+    mutate(
+        vote_margin = abs(dem_votes - rep_votes),
+        dem_wasted = if_else(
+            dem_won,
+            dem_votes - (dem_votes + rep_votes) / 2,
+            dem_votes
+        ),
+        rep_wasted = if_else(
+            !dem_won,
+            rep_votes - (dem_votes + rep_votes) / 2,
+            rep_votes
+        )
+    )
+
+total_dem_wasted <- sum(election_metrics$dem_wasted)
+total_rep_wasted <- sum(election_metrics$rep_wasted)
+total_votes_cast <- sum(election_metrics$dem_votes + election_metrics$rep_votes)
+efficiency_gap <- (total_rep_wasted - total_dem_wasted) / total_votes_cast
+
+cat("EFFICIENCY GAP")
+cat("Total Democratic Wasted Votes:", format(total_dem_wasted, big.mark = ","), "\n")
+cat("Total Republican Wasted Votes:", format(total_rep_wasted, big.mark = ","), "\n")
+cat("Efficiency Gap:", round(efficiency_gap * 100, 2), "%\n")
+if (abs(efficiency_gap) < 0.08) {
+    cat("Interpretation: Within acceptable range (< 8%)\n")
+} else if (efficiency_gap > 0) {
+    cat("Interpretation: Republicans have an efficiency advantage (wasting fewer votes)\n")
+} else {
+    cat("Interpretation: Democrats have an efficiency advantage (wasting fewer votes)\n")
+}
+
+cat("\nWon:\n")
+cat("Democrats:", sum(election_metrics$dem_won), "seats\n")
+cat("Republicans:", sum(!election_metrics$dem_won), "seats\n")
+
+plot()
+```
 
 ### 2024 Election Results and the proposed 2025 District Map
 
